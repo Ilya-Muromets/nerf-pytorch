@@ -6,3 +6,5 @@ tensorboard
 torch>=1.6.0
 torchvision>=0.5
 tqdm
+git+https://github.com/aliutkus/torchsearchsorted
+

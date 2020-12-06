@@ -1,4 +1,5 @@
 import torch
+import os
 
 from .nerf_helpers import get_minibatches, ndc_rays
 from .nerf_helpers import sample_pdf_2 as sample_pdf
@@ -25,15 +26,7 @@ def run_network(network_fn, pts, ray_batch, chunksize, embed_fn, embeddirs_fn):
     return radiance_field
 
 
-def predict_and_render_radiance(
-    ray_batch,
-    model_coarse,
-    model_fine,
-    options,
-    mode="train",
-    encode_position_fn=None,
-    encode_direction_fn=None,
-):
+def predict_and_render_radiance(ray_batch, model_coarse, model_fine, options, mode="train", encode_position_fn=None, encode_direction_fn=None, iteration=0):
     # TESTED
     num_rays = ray_batch.shape[0]
     ro, rd = ray_batch[..., :3], ray_batch[..., 3:6]
@@ -42,67 +35,77 @@ def predict_and_render_radiance(
 
     # TODO: Use actual values for "near" and "far" (instead of 0. and 1.)
     # when not enabling "ndc".
-    t_vals = torch.linspace(
-        0.0,
-        1.0,
-        getattr(options.nerf, mode).num_coarse,
-        dtype=ro.dtype,
-        device=ro.device,
-    )
+    if getattr(options.nerf, mode).perturb == "normal":
+        t_vals = torch.linspace(
+            0.0,
+            0.5,
+            getattr(options.nerf, mode).num_coarse,
+            dtype=ro.dtype,
+            device=ro.device,
+        )
+    else:
+        t_vals = torch.linspace(
+            0.0,
+            1.0,
+            getattr(options.nerf, mode).num_coarse,
+            dtype=ro.dtype,
+            device=ro.device,
+        )
+        
     if not getattr(options.nerf, mode).lindisp:
         z_vals = near * (1.0 - t_vals) + far * t_vals
     else:
         z_vals = 1.0 / (1.0 / near * (1.0 - t_vals) + 1.0 / far * t_vals)
     z_vals = z_vals.expand([num_rays, getattr(options.nerf, mode).num_coarse])
-
-    if getattr(options.nerf, mode).perturb:
+    if getattr(options.nerf, mode).perturb == "random":
         # Get intervals between samples.
         mids = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
         upper = torch.cat((mids, z_vals[..., -1:]), dim=-1)
         lower = torch.cat((z_vals[..., :1], mids), dim=-1)
         # Stratified samples in those intervals.
         t_rand = torch.rand(z_vals.shape, dtype=ro.dtype, device=ro.device)
-        z_vals = lower + (upper - lower) * t_rand
+        z_vals = lower + (upper - lower) * t_rand #  rand(0,1) * range
+        
+        
     # pts -> (num_rays, N_samples, 3)
     pts = ro[..., None, :] + rd[..., None, :] * z_vals[..., :, None]
 
-    radiance_field = run_network(
-        model_coarse,
-        pts,
-        ray_batch,
-        getattr(options.nerf, mode).chunksize,
-        encode_position_fn,
-        encode_direction_fn,
-    )
-
-    (
-        rgb_coarse,
-        disp_coarse,
-        acc_coarse,
-        weights,
-        depth_coarse,
-    ) = volume_render_radiance_field(
-        radiance_field,
-        z_vals,
-        rd,
-        radiance_field_noise_std=getattr(options.nerf, mode).radiance_field_noise_std,
-        white_background=getattr(options.nerf, mode).white_background,
-    )
+    radiance_field = run_network(model_coarse, pts, ray_batch, getattr(options.nerf, mode).chunksize, encode_position_fn, encode_direction_fn)
+    (rgb_coarse, disp_coarse, acc_coarse, weights, depth_coarse) = volume_render_radiance_field(radiance_field,
+                                                                                                z_vals,
+                                                                                                rd,
+                                                                                                radiance_field_noise_std=getattr(options.nerf, mode).radiance_field_noise_std,
+                                                                                                white_background=getattr(options.nerf, mode).white_background,
+                                                                                            )
 
     rgb_fine, disp_fine, acc_fine = None, None, None
     if getattr(options.nerf, mode).num_fine > 0:
         # rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
-
         z_vals_mid = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
+#         os.makedirs("rays/" + str(getattr(options.nerf, mode).num_fine) + "/z_vals_mid/", exist_ok=True)
+#         os.makedirs("rays/" + str(getattr(options.nerf, mode).num_fine) + "/weights/", exist_ok=True)
+#         os.makedirs("rays/" + str(getattr(options.nerf, mode).num_fine) + "/z_vals_fine/", exist_ok=True)
+#         torch.save(z_vals_mid, "rays/" + str(getattr(options.nerf, mode).num_fine) + "/z_vals_mid/" + str(iteration) + ".pt")
+#         torch.save(weights, "rays/" + str(getattr(options.nerf, mode).num_fine) + "/weights/" + str(iteration) + ".pt")
+
         z_samples = sample_pdf(
             z_vals_mid,
             weights[..., 1:-1],
-            getattr(options.nerf, mode).num_fine,
-            det=(getattr(options.nerf, mode).perturb == 0.0),
+            getattr(options.nerf, mode).num_fine*2,
+            det=(getattr(options.nerf, mode).perturb),
         )
         z_samples = z_samples.detach()
+#         torch.save(torch.sort(z_samples, dim=-1)[0], "rays/" + str(getattr(options.nerf, mode).num_fine) + "/z_vals_fine/" + str(iteration) + ".pt")
+        
+        #bias towards uniform at start:
+        gamma = torch.exp(torch.tensor((-1.0*iteration/options.experiment.train_iters)))
+        interval = z_vals[0,1] - z_vals[0,0]
+        z_vals_offset = (z_vals + interval/2).detach()
+        z_vals, _ = torch.sort(torch.cat((z_vals, z_vals_offset), dim=-1), dim=-1)
+        z_vals = gamma*z_vals + (1 - gamma)*z_samples
 
-        z_vals, _ = torch.sort(torch.cat((z_vals, z_samples), dim=-1), dim=-1)
+#         z_vals, _ = torch.sort(torch.cat((z_vals, z_samples), dim=-1), dim=-1)
+    
         # pts -> (N_rays, N_samples + N_importance, 3)
         pts = ro[..., None, :] + rd[..., None, :] * z_vals[..., :, None]
 
@@ -114,7 +117,7 @@ def predict_and_render_radiance(
             encode_position_fn,
             encode_direction_fn,
         )
-        rgb_fine, disp_fine, acc_fine, _, _ = volume_render_radiance_field(
+        rgb_fine, disp_fine, acc_fine, weights_fine, depth_fine = volume_render_radiance_field(
             radiance_field,
             z_vals,
             rd,
@@ -123,7 +126,6 @@ def predict_and_render_radiance(
             ).radiance_field_noise_std,
             white_background=getattr(options.nerf, mode).white_background,
         )
-
     return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine
 
 
@@ -139,6 +141,7 @@ def run_one_iter_of_nerf(
     mode="train",
     encode_position_fn=None,
     encode_direction_fn=None,
+    iteration=0,
 ):
     viewdirs = None
     if options.nerf.use_viewdirs:
@@ -176,6 +179,7 @@ def run_one_iter_of_nerf(
             options,
             encode_position_fn=encode_position_fn,
             encode_direction_fn=encode_direction_fn,
+            iteration=iteration,
         )
         for batch in batches
     ]

@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torchvision
 import yaml
+from gpuinfo import GPUInfo
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm, trange
 
@@ -163,6 +164,7 @@ def main():
         start_iter = checkpoint["iter"]
 
     # # TODO: Prepare raybatch tensor if batching random rays
+    gpu_usage = []
 
     for i in trange(start_iter, cfg.experiment.train_iters):
 
@@ -205,6 +207,7 @@ def main():
                 mode="train",
                 encode_position_fn=encode_position_fn,
                 encode_direction_fn=encode_direction_fn,
+                iteration=i,
             )
         else:
             img_idx = np.random.choice(i_train)
@@ -238,6 +241,7 @@ def main():
                 mode="train",
                 encode_position_fn=encode_position_fn,
                 encode_direction_fn=encode_direction_fn,
+                iteration=i,
             )
             target_ray_values = target_s
 
@@ -257,7 +261,10 @@ def main():
         #     loss = coarse_loss
         loss = coarse_loss + (fine_loss if fine_loss is not None else 0.0)
         loss.backward()
-        psnr = mse2psnr(loss.item())
+        if rgb_fine is not None:
+            psnr = mse2psnr(fine_loss.item())
+        else:
+            psnr = mse2psnr(coarse_loss.item())
         optimizer.step()
         optimizer.zero_grad()
 
@@ -282,6 +289,8 @@ def main():
         writer.add_scalar("train/coarse_loss", coarse_loss.item(), i)
         if rgb_fine is not None:
             writer.add_scalar("train/fine_loss", fine_loss.item(), i)
+        else:
+            writer.add_scalar("train/fine_loss", coarse_loss.item(), i)
         writer.add_scalar("train/psnr", psnr, i)
 
         # Validation
@@ -344,7 +353,10 @@ def main():
                 else:
                     loss = coarse_loss
                 loss = coarse_loss + fine_loss
-                psnr = mse2psnr(loss.item())
+                if rgb_fine is not None:
+                    psnr = mse2psnr(fine_loss.item())
+                else:
+                    psnr = mse2psnr(coarse_loss.item())
                 writer.add_scalar("validation/loss", loss.item(), i)
                 writer.add_scalar("validation/coarse_loss", coarse_loss.item(), i)
                 writer.add_scalar("validataion/psnr", psnr, i)
@@ -356,6 +368,9 @@ def main():
                         "validation/rgb_fine", cast_to_image(rgb_fine[..., :3]), i
                     )
                     writer.add_scalar("validation/fine_loss", fine_loss.item(), i)
+                else:
+                    writer.add_scalar("validation/fine_loss", coarse_loss.item(), i)     
+            
                 writer.add_image(
                     "validation/img_target",
                     cast_to_image(target_ray_values[..., :3]),
@@ -371,6 +386,11 @@ def main():
                 )
 
         if i % cfg.experiment.save_every == 0 or i == cfg.experiment.train_iters - 1:
+            gpu_usage.append(GPUInfo.gpu_usage())
+            with open(os.path.join(logdir, "gpu_usage.txt"), 'w') as f:
+                for item in gpu_usage:
+                    f.write("%s\n" % str(item))
+                    
             checkpoint_dict = {
                 "iter": i,
                 "model_coarse_state_dict": model_coarse.state_dict(),

@@ -72,6 +72,7 @@ def main():
             testskip=cfg.dataset.testskip,
         )
         i_train, i_val, i_test = i_split
+        render_poses = poses[i_val]
         H, W, focal = hwf
         H, W = int(H), int(W)
     elif cfg.dataset.type.lower() == "llff":

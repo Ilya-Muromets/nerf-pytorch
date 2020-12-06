@@ -3,6 +3,9 @@ from typing import Optional
 
 import torch
 
+# import torchsearchsorted
+
+
 def img2mse(img_src, img_tgt):
     return torch.nn.functional.mse_loss(img_src, img_tgt)
 
@@ -252,11 +255,11 @@ def sample_pdf(bins, weights, num_samples, det=False):
     return samples
 
 
-def sample_pdf_2(bins, weights, num_samples, det=False):
+def sample_pdf_2(bins, weights, num_samples, det="uniform"):
     r"""sample_pdf function from another concurrent pytorch implementation
     by yenchenlin (https://github.com/yenchenlin/nerf-pytorch).
     """
-
+    
     weights = weights + 1e-5
     pdf = weights / torch.sum(weights, dim=-1, keepdim=True)
     cdf = torch.cumsum(pdf, dim=-1)
@@ -264,13 +267,17 @@ def sample_pdf_2(bins, weights, num_samples, det=False):
         [torch.zeros_like(cdf[..., :1]), cdf], dim=-1
     )  # (batchsize, len(bins))
 
-    # Take uniform samples
-    if det:
+    # sampling
+    if det == "chebyshev":
+        k = torch.arange(1, num_samples+1, dtype=weights.dtype, device=weights.device)
+        u = ((torch.cos((2*k - 1)*3.1415926535/(2*num_samples)) + 1)/2).sort()[0]
+        u = u.expand(list(cdf.shape[:-1]) + [num_samples])
+    if det == "uniform":
         u = torch.linspace(
             0.0, 1.0, steps=num_samples, dtype=weights.dtype, device=weights.device
         )
         u = u.expand(list(cdf.shape[:-1]) + [num_samples])
-    else:
+    elif det == "random":
         u = torch.rand(
             list(cdf.shape[:-1]) + [num_samples],
             dtype=weights.dtype,

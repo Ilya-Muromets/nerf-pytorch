@@ -58,7 +58,7 @@ def load_blender_data(basedir, half_res=False, testskip=1, debug=False):
 
         for frame in meta["frames"][::skip]:
             fname = os.path.join(basedir, frame["file_path"] + ".png")
-            imgs.append(imageio.imread(fname))
+            imgs.append(imageio.imread(fname)[:,:,:3]) # append 3 channel
             poses.append(np.array(frame["transform_matrix"]))
         imgs = (np.array(imgs) / 255.0).astype(np.float32)
         poses = np.array(poses).astype(np.float32)
@@ -90,7 +90,7 @@ def load_blender_data(basedir, half_res=False, testskip=1, debug=False):
         focal = focal / 32.0
         imgs = [
             torch.from_numpy(
-                cv2.resize(imgs[i], dsize=(25, 25), interpolation=cv2.INTER_AREA)
+                cv2.resize(imgs[i], dsize=(H, W), interpolation=cv2.INTER_AREA)
             )
             for i in range(imgs.shape[0])
         ]
@@ -105,7 +105,7 @@ def load_blender_data(basedir, half_res=False, testskip=1, debug=False):
         focal = focal / 2.0
         imgs = [
             torch.from_numpy(
-                cv2.resize(imgs[i], dsize=(400, 400), interpolation=cv2.INTER_AREA)
+                cv2.resize(imgs[i], dsize=(H, W), interpolation=cv2.INTER_AREA)
             )
             for i in range(imgs.shape[0])
         ]
